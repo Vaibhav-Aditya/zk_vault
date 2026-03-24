@@ -15,3 +15,5 @@ services:
         generateValue: true
       - key: PYTHON_VERSION
         value: "3.14.3"
+      - key: PORT
+        value: 8000
