@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: zk-auth-vault
+    runtime: python
+    region: oregon
+    plan: free
+
+    buildCommand: pip install -r server/requirements.txt
+    startCommand: uvicorn server.main:app --host 0.0.0.0 --port $PORT
+
+    disk:
+      name: vault-data
+      mountPath: /data
+      sizeGB: 1
+
+    envVars:
+      - key: DATA_DIR
+        value: /data
+      - key: JWT_SECRET
+        generateValue: true
+      - key: PYTHON_VERSION
+        value: "3.12"
