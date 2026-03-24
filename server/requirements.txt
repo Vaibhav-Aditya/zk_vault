@@ -2,3 +2,4 @@ pyjwt
 fastapi
 tinydb
 python-multipart
+uvicorn
