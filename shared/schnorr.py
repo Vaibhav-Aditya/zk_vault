@@ -1,21 +1,6 @@
-"""
-Schnorr Identification Protocol - Zero Knowledge Proof Primitives
-=================================================================
-Uses a safe prime group for the discrete logarithm problem.
-
-Protocol:
-  1. Registration: Client computes public key Y = g^x mod p (x is secret)
-  2. Prover (Client) picks random r, sends commitment T = g^r mod p
-  3. Verifier (Server) sends challenge c (random integer)
-  4. Prover responds with s = (r - c*x) mod q
-  5. Verifier checks g^s * Y^c mod p == T
-"""
-
-import hashlib
-import os
 import secrets
 
-# ── Safe 2048-bit prime group (RFC 3526, Group 14) ──────────────────────────
+# RFC 3526, Group 14
 P = int(
     "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1"
     "29024E088A67CC74020BBEA63B139B22514A08798E3404DD"
@@ -30,47 +15,31 @@ P = int(
     "15728E5A8AACAA68FFFFFFFFFFFFFFFF",
     16,
 )
-G = 2          # generator
-Q = (P - 1) // 2  # sub-group order (safe prime: P = 2Q + 1)
+G = 2
+Q = (P - 1) // 2
 
-
+# returns a tuple of (private_key, public_key)
 def generate_keypair() -> tuple[int, int]:
-    """Generate a Schnorr keypair.
-    Returns (private_key x, public_key Y) where Y = g^x mod p.
-    x must be in [1, Q-1].
-    """
     x = secrets.randbelow(Q - 1) + 1
     Y = pow(G, x, P)
     return x, Y
 
-
+# returns a tuple of (commitment, public_commitment)
 def generate_commitment() -> tuple[int, int]:
-    """Prover step 1: pick random r, return (r, T=g^r mod p)."""
     r = secrets.randbelow(Q - 1) + 1
     T = pow(G, r, P)
     return r, T
 
-
+# returns a random int belonging to the cyclic subgroup of prime order Q (challenge)
 def generate_challenge() -> int:
-    """Verifier step: generate a random challenge c."""
     return secrets.randbelow(Q - 1) + 1
 
-
+# returns the response of challenge
 def generate_response(r: int, c: int, x: int) -> int:
-    """Prover step 2: compute response s = (r - c*x) mod Q."""
     return (r - c * x) % Q
 
-
+# checks if the proof is valid or not
 def verify(Y: int, T: int, c: int, s: int) -> bool:
     """Verifier step: check g^s * Y^c ≡ T (mod P)."""
     lhs = (pow(G, s, P) * pow(Y, c, P)) % P
     return lhs == T
-
-
-def hash_challenge(T: int, username: str, nonce: bytes) -> int:
-    """Fiat-Shamir heuristic: derive c deterministically (optional helper)."""
-    h = hashlib.sha256()
-    h.update(T.to_bytes((T.bit_length() + 7) // 8, "big"))
-    h.update(username.encode())
-    h.update(nonce)
-    return int.from_bytes(h.digest(), "big") % Q
