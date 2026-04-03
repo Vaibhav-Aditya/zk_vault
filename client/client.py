@@ -23,6 +23,7 @@ import os
 import secrets
 import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import requests
 from shared.schnorr import (
     generate_keypair,
@@ -30,8 +31,6 @@ from shared.schnorr import (
     generate_response,
 )
 from shared.crypto_utils import derive_file_key, encrypt_file, decrypt_file
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 KEYS_DIR = Path.home() / ".zk_vault"
 KEYS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)

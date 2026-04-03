@@ -28,6 +28,7 @@ import secrets
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import jwt
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,9 +36,6 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from tinydb import TinyDB, Query
 from shared.schnorr import P, generate_challenge, verify
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 
 JWT_SECRET = os.environ.get("JWT_SECRET", secrets.token_hex(32))
 JWT_ALGORITHM = "HS256"
