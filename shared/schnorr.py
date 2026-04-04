@@ -40,6 +40,15 @@ def generate_response(r: int, c: int, x: int) -> int:
 
 # checks if the proof is valid or not
 def verify(Y: int, T: int, c: int, s: int) -> bool:
-    """Verifier step: check g^s * Y^c ≡ T (mod P)."""
     lhs = (pow(G, s, P) * pow(Y, c, P)) % P
     return lhs == T
+
+# calculates others_public_key**my_private_key
+def dh_agree(my_private: int, their_public: int) -> int:
+    return pow(their_public, my_private, P)
+
+# generates a private random (r, R)
+def ephemeral_keypair() -> tuple[int, int]:
+    r = secrets.randbelow(Q - 1) + 1
+    R = pow(G, r, P)
+    return r, R

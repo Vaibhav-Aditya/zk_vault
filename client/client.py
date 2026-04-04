@@ -16,7 +16,7 @@ Commands (prompted interactively):
     logout     — clear local session
     exit       — quit
 """
-
+import base64
 import argparse
 import json
 import os
@@ -31,6 +31,8 @@ from shared.schnorr import (
     generate_response,
 )
 from shared.crypto_utils import derive_file_key, encrypt_file, decrypt_file
+from shared.schnorr import dh_agree, ephemeral_keypair, P
+from shared.crypto_utils import derive_envelope_key, wrap_key, unwrap_key
 
 KEYS_DIR = Path.home() / ".zk_vault"
 KEYS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -229,11 +231,166 @@ def cmd_delete(base_url: str, token: str):
     else:
         print(f"Error {resp.status_code}: {resp.text}")
 
+
+def cmd_share(base_url: str, username: str, token: str):
+    file_id   = input("  File ID to share: ").strip()
+    recipient = input("  Recipient username: ").strip()
+
+    if not file_id or not recipient:
+        print("File ID and recipient are required")
+        return
+
+    resp = api("GET", base_url, f"/users/{recipient}/pubkey", token=token)
+    if resp.status_code != 200:
+        print(f"Could not fetch recipient's public key: {resp.text}")
+        return
+    Y_recipient = resp.json()["public_key"]
+
+    resp = api("GET", base_url, f"/vault/download/{file_id}", token=token)
+    if resp.status_code != 200:
+        print(f"Could not download file: {resp.text}")
+        return
+
+    bundle = resp.content
+    salt       = bundle[:32]
+    nonce      = bundle[32:44]
+    ciphertext = bundle[44:]
+
+    keys = load_keys(username)
+    if keys is None:
+        print("Local keys not found")
+        return
+    _, my_public_key = keys
+
+    file_key = derive_file_key(my_public_key, salt)
+
+    try:
+        decrypt_file(nonce, ciphertext, file_key)
+    except Exception:
+        print("Could not decrypt file — key mismatch")
+        return
+
+    r_eph, R_eph = ephemeral_keypair()
+
+    shared_secret = dh_agree(r_eph, Y_recipient)
+    envelope_key  = derive_envelope_key(shared_secret)
+
+    wrap_nonce, wrapped_key = wrap_key(file_key, envelope_key)
+
+    payload = {
+        "recipient":         recipient,
+        "file_id":           file_id,
+        "ephemeral_pubkey":  R_eph,
+        "wrapped_key_nonce": base64.b64encode(wrap_nonce).decode(),
+        "wrapped_key":       base64.b64encode(wrapped_key).decode(),
+        "wrapped_key_salt":  base64.b64encode(salt).decode(),
+    }
+
+    resp = api("POST", base_url, "/vault/share", token=token, json=payload)
+    if resp.status_code == 200:
+        print(f"File shared with '{recipient}'")
+        print(f"Share ID: {resp.json()['share_id']}")
+    else:
+        print(f"Error {resp.status_code}: {resp.text}")
+
+
+def cmd_shared_with_me(base_url: str, token: str, private_key: int):
+    resp = api("GET", base_url, "/vault/shared-with-me", token=token)
+    if resp.status_code != 200:
+        print(f"Error {resp.status_code}: {resp.text}")
+        return
+
+    shares = resp.json()
+    if not shares:
+        print("(no files shared with you)")
+        return
+
+    print(f"\n  {'SHARE ID':<38}  {'FILE':<28}  {'FROM':<16}  SHARED AT")
+    print("  " + "─" * 100)
+    for s in shares:
+        print(
+            f"  {s['share_id']:<38}  {s['filename']:<28}  "
+            f"{s['owner']:<16}  {s['shared_at'][:19]}"
+        )
+
+    print()
+    action = input("Download a file? Enter share_id (or blank to skip): ").strip()
+    if not action:
+        return
+
+    share = next((s for s in shares if s["share_id"] == action), None)
+    if share is None:
+        print("Share ID not found in list")
+        return
+
+    out_path = input("Save decrypted file to: ").strip()
+    out      = Path(out_path).expanduser()
+
+    resp = api("GET", base_url, f"/vault/download/{share['file_id']}", token=token)
+    if resp.status_code != 200:
+        print(f"Download error: {resp.text}")
+        return
+
+    bundle = resp.content
+
+    try:
+        R_eph        = share["ephemeral_pubkey"]
+        wrap_nonce   = base64.b64decode(share["wrapped_key_nonce"])
+        wrapped_key  = base64.b64decode(share["wrapped_key"])
+        nonce        = bundle[32:44]
+        ciphertext   = bundle[44:]
+
+        shared_secret = dh_agree(private_key, R_eph)
+        envelope_key  = derive_envelope_key(shared_secret)
+        file_key      = unwrap_key(wrap_nonce, wrapped_key, envelope_key)
+        plaintext     = decrypt_file(nonce, ciphertext, file_key)
+
+        out.write_bytes(plaintext)
+        print(f"Decrypted and saved to: {out}  ({len(plaintext):,} bytes)")
+    except Exception as e:
+        print(f"Decryption failed: {e}")
+
+
+def cmd_revoke_share(base_url: str, token: str):
+    resp = api("GET", base_url, "/vault/my-shares", token=token)
+    if resp.status_code != 200:
+        print(f"Error fetching shares: {resp.text}")
+        return
+
+    shares = resp.json()
+    if not shares:
+        print("(you have not shared any files)")
+        return
+
+    print(f"\n  {'SHARE ID':<38}  {'FILE':<28}  {'SHARED WITH':<16}  SHARED AT")
+    print("  " + "─" * 100)
+    for s in shares:
+        print(
+            f"  {s['share_id']:<38}  {s['filename']:<28}  "
+            f"{s['recipient']:<16}  {s['shared_at'][:19]}"
+        )
+
+    print()
+    share_id = input("  Share ID to revoke (or blank to cancel): ").strip()
+    if not share_id:
+        return
+
+    confirm = input(f"  Revoke share '{share_id}'? [y/N]: ").strip().lower()
+    if confirm != "y":
+        print("Aborted.")
+        return
+
+    resp = api("DELETE", base_url, f"/vault/share/{share_id}", token=token)
+    if resp.status_code == 200:
+        print("Share revoked")
+    else:
+        print(f"Error {resp.status_code}: {resp.text}")
+
 BANNER = """
 ╔══════════════════════════════════════════╗
 ║   ZK Authentication Vault (Schnorr ZKP)  ║
 ╚══════════════════════════════════════════╝
-Commands: register | login | upload | list | download | delete | logout | exit
+Commands: register | login | upload | list | download | delete | share | shared | revoke | logout | exit
 """
 
 MENU = """
@@ -244,6 +401,9 @@ MENU = """
   download   — download & decrypt file
   delete     — delete a vault file
   logout     — clear local session
+  share      — share a file
+  shared     — see files shared with me
+  revoke     — revoke a shared file
   exit       — quit
 """
 
@@ -295,7 +455,7 @@ def main():
             current_token = None
             print("Logged out")
 
-        elif cmd in ("upload", "list", "download", "delete"):
+        elif cmd in ("upload", "list", "download", "delete", "share", "shared", "revoke"):
             if not current_user or not current_token:
                 print("Please login first")
                 continue
@@ -303,7 +463,7 @@ def main():
             if keys is None:
                 print("Local keys not found — please re-register")
                 continue
-            _, public_key = keys
+            private_key, public_key = keys
 
             if cmd == "upload":
                 cmd_upload(base_url, current_token, public_key)
@@ -313,6 +473,12 @@ def main():
                 cmd_download(base_url, current_token, public_key)
             elif cmd == "delete":
                 cmd_delete(base_url, current_token)
+            elif cmd == "share":
+                cmd_share(base_url, current_user, current_token)
+            elif cmd == "shared":
+                cmd_shared_with_me(base_url, current_token, private_key)
+            elif cmd == "revoke":
+                cmd_revoke_share(base_url, current_token)
 
         elif cmd == "":
             pass

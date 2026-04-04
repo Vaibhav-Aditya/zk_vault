@@ -51,6 +51,7 @@ db = TinyDB(DATA_DIR / "db.json", indent=2)
 users_table    = db.table("users")
 sessions_table = db.table("sessions")
 files_table    = db.table("files")
+shares_table   = db.table("shares")
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("zk-vault")
@@ -90,6 +91,25 @@ class FileMetadata(BaseModel):
     filename: str
     size: int
     uploaded_at: str
+
+class ShareRequest(BaseModel):
+    recipient: str
+    file_id: str
+    ephemeral_pubkey: int = Field(..., description="R = g^r mod p (one-time DH key)")
+    wrapped_key_nonce: str = Field(..., description="base64-encoded nonce")
+    wrapped_key: str       = Field(..., description="base64-encoded AES-GCM wrapped file key")
+    wrapped_key_salt: str  = Field(..., description="base64-encoded salt used for original file key")
+
+class ShareMetadata(BaseModel):
+    share_id: str
+    file_id: str
+    filename: str
+    owner: str
+    shared_at: str
+    ephemeral_pubkey: int
+    wrapped_key_nonce: str
+    wrapped_key: str
+    wrapped_key_salt: str
 
 def issue_jwt(username: str) -> str:
     payload = {
@@ -229,13 +249,27 @@ def list_files(username: str = Depends(require_auth)):
 
 @app.get("/vault/download/{file_id}", summary="Download an encrypted file")
 def download_file(file_id: str, username: str = Depends(require_auth)):
-    FileQ = Query()
-    records = files_table.search((FileQ.file_id == file_id) & (FileQ.username == username))
-    if not records:
-        raise HTTPException(status_code=404, detail="File not found")
+    FileQ  = Query()
+    ShareQ = Query()
 
-    record = records[0]
-    file_path = VAULT_DIR / username / file_id
+    records = files_table.search(
+        (FileQ.file_id == file_id) & (FileQ.username == username)
+    )
+
+    if not records:
+        share = shares_table.search(
+            (ShareQ.file_id == file_id) & (ShareQ.recipient == username)
+        )
+        if not share:
+            raise HTTPException(status_code=404, detail="File not found")
+        records = files_table.search(FileQ.file_id == file_id)
+        if not records:
+            raise HTTPException(status_code=404, detail="File data missing on server")
+
+    record    = records[0]
+    owner     = record["username"]
+    file_path = VAULT_DIR / owner / file_id
+
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File data missing on server")
 
@@ -243,7 +277,9 @@ def download_file(file_id: str, username: str = Depends(require_auth)):
     return Response(
         content=data,
         media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{record["filename"]}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{record["filename"]}"'
+        },
     )
 
 @app.delete("/vault/delete/{file_id}", summary="Delete a vault file")
@@ -260,6 +296,126 @@ def delete_file(file_id: str, username: str = Depends(require_auth)):
     files_table.remove((FileQ.file_id == file_id) & (FileQ.username == username))
     log.info("File deleted: %s  user: %s", file_id, username)
     return {"message": "File deleted successfully"}
+
+@app.get("/users/{username}/pubkey", summary="Fetch a user's public key")
+def get_pubkey(username: str, _: str = Depends(require_auth)):
+    """
+    Authenticated users can look up any other user's public key.
+    This is needed by the sender to compute the DH shared secret.
+    """
+    UserQ = Query()
+    user = users_table.search(UserQ.username == username)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"username": username, "public_key": user[0]["public_key"]}
+
+
+@app.post("/vault/share", summary="Share an encrypted file with another user")
+def share_file(body: ShareRequest, owner: str = Depends(require_auth)):
+    """
+    The sender has already:
+      1. Downloaded their file bundle and extracted the file key k
+      2. Generated an ephemeral DH keypair (r, R)
+      3. Computed shared_secret = Y_recipient ^ r mod p
+      4. Wrapped k under AES-GCM(H(shared_secret))
+    This endpoint stores the envelope so the recipient can retrieve it.
+    """
+    FileQ = Query()
+    file_rec = files_table.search(
+        (FileQ.file_id == body.file_id) & (FileQ.username == owner)
+    )
+    if not file_rec:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    UserQ = Query()
+    if not users_table.search(UserQ.username == body.recipient):
+        raise HTTPException(status_code=404, detail="Recipient not found")
+
+    if body.recipient == owner:
+        raise HTTPException(status_code=400, detail="Cannot share with yourself")
+
+    ShareQ = Query()
+    existing = shares_table.search(
+        (ShareQ.file_id == body.file_id) & (ShareQ.recipient == body.recipient)
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="File already shared with this user")
+
+    share_id = str(uuid.uuid4())
+    shares_table.insert({
+        "share_id":          share_id,
+        "file_id":           body.file_id,
+        "owner":             owner,
+        "recipient":         body.recipient,
+        "ephemeral_pubkey":  body.ephemeral_pubkey,
+        "wrapped_key_nonce": body.wrapped_key_nonce,
+        "wrapped_key":       body.wrapped_key,
+        "wrapped_key_salt":  body.wrapped_key_salt,
+        "shared_at":         datetime.now(timezone.utc).isoformat(),
+    })
+
+    log.info("File %s shared from %s to %s", body.file_id, owner, body.recipient)
+    return {"share_id": share_id, "message": f"File shared with '{body.recipient}'"}
+
+
+@app.get("/vault/shared-with-me", response_model=list[ShareMetadata],
+         summary="List files shared with the authenticated user")
+def shared_with_me(username: str = Depends(require_auth)):
+    ShareQ = Query()
+    FileQ  = Query()
+    records = shares_table.search(ShareQ.recipient == username)
+
+    result = []
+    for r in records:
+        file_rec = files_table.search(FileQ.file_id == r["file_id"])
+        filename = file_rec[0]["filename"] if file_rec else "unknown"
+        result.append(ShareMetadata(
+            share_id          = r["share_id"],
+            file_id           = r["file_id"],
+            filename          = filename,
+            owner             = r["owner"],
+            shared_at         = r["shared_at"],
+            ephemeral_pubkey  = r["ephemeral_pubkey"],
+            wrapped_key_nonce = r["wrapped_key_nonce"],
+            wrapped_key       = r["wrapped_key"],
+            wrapped_key_salt  = r["wrapped_key_salt"],
+        ))
+    return result
+
+# Only the original owner can revoke a share.
+@app.delete("/vault/share/{share_id}", summary="Revoke a file share")
+def revoke_share(share_id: str, username: str = Depends(require_auth)):
+    ShareQ = Query()
+    records = shares_table.search(ShareQ.share_id == share_id)
+    if not records:
+        raise HTTPException(status_code=404, detail="Share not found")
+
+    if records[0]["owner"] != username:
+        raise HTTPException(status_code=403, detail="Only the file owner can revoke shares")
+
+    shares_table.remove(ShareQ.share_id == share_id)
+    log.info("Share %s revoked by %s", share_id, username)
+    return {"message": "Share revoked successfully"}
+
+# Shows the owner all active shares they have created.
+@app.get("/vault/my-shares", summary="List files you have shared with others")
+def my_shares(username: str = Depends(require_auth)):
+    ShareQ = Query()
+    FileQ  = Query()
+    records = shares_table.search(ShareQ.owner == username)
+
+    result = []
+    for r in records:
+        file_rec = files_table.search(FileQ.file_id == r["file_id"])
+        filename = file_rec[0]["filename"] if file_rec else "unknown"
+        result.append({
+            "share_id":  r["share_id"],
+            "file_id":   r["file_id"],
+            "filename":  filename,
+            "recipient": r["recipient"],
+            "shared_at": r["shared_at"],
+        })
+    return result
 
 @app.get("/health", include_in_schema=False)
 def health():
