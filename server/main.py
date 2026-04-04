@@ -417,7 +417,7 @@ def my_shares(username: str = Depends(require_auth)):
         })
     return result
 
-@app.get("/health", include_in_schema=False)
+@app.head("/health", include_in_schema=False)
 def health():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
