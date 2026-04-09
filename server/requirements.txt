@@ -3,3 +3,5 @@ fastapi
 tinydb
 python-multipart
 uvicorn
+pydantic
+cryptography
