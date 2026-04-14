@@ -147,7 +147,7 @@ def cmd_login(base_url: str) -> tuple[str, str] | None:
     return None
 
 
-def cmd_upload(base_url: str, token: str, public_key: int):
+def cmd_upload(base_url: str, token: str, private_key: int):
     file_path = input("  Local file path: ").strip()
     path = Path(file_path).expanduser()
     if not path.exists():
@@ -158,7 +158,7 @@ def cmd_upload(base_url: str, token: str, public_key: int):
     print(f"Encrypting '{path.name}' ({len(raw):,} bytes)…")
 
     salt = secrets.token_bytes(32)
-    file_key = derive_file_key(public_key, salt)
+    file_key = derive_file_key(private_key, salt)
     nonce, ciphertext = encrypt_file(raw, file_key)
     bundle = salt + nonce + ciphertext
     print(f"Uploading encrypted bundle ({len(bundle):,} bytes)…")
@@ -193,7 +193,7 @@ def cmd_list(base_url: str, token: str):
         print(f"{f['file_id']:<38}  {f['filename']:<30}  {size_str:>10}  {f['uploaded_at'][:19]}")
 
 
-def cmd_download(base_url: str, token: str, public_key: int):
+def cmd_download(base_url: str, token: str, private_key: int):
     file_id = input("File ID to download: ").strip()
     out_path = input("Save decrypted file to: ").strip()
     out = Path(out_path).expanduser()
@@ -210,7 +210,7 @@ def cmd_download(base_url: str, token: str, public_key: int):
         salt = bundle[:32]
         nonce = bundle[32:44]
         ciphertext = bundle[44:]
-        file_key = derive_file_key(public_key, salt)
+        file_key = derive_file_key(private_key, salt)
         plaintext = decrypt_file(nonce, ciphertext, file_key)
         out.write_bytes(plaintext)
         print(f"Decrypted file saved to: {out}  ({len(plaintext):,} bytes)")
@@ -260,9 +260,9 @@ def cmd_share(base_url: str, username: str, token: str):
     if keys is None:
         print("Local keys not found")
         return
-    _, my_public_key = keys
+    private_key, _ = keys
 
-    file_key = derive_file_key(my_public_key, salt)
+    file_key = derive_file_key(private_key, salt)
 
     try:
         decrypt_file(nonce, ciphertext, file_key)
@@ -466,11 +466,11 @@ def main():
             private_key, public_key = keys
 
             if cmd == "upload":
-                cmd_upload(base_url, current_token, public_key)
+                cmd_upload(base_url, current_token, private_key)
             elif cmd == "list":
                 cmd_list(base_url, current_token)
             elif cmd == "download":
-                cmd_download(base_url, current_token, public_key)
+                cmd_download(base_url, current_token, private_key)
             elif cmd == "delete":
                 cmd_delete(base_url, current_token)
             elif cmd == "share":

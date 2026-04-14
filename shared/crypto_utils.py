@@ -3,8 +3,8 @@ import secrets
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # returns a key for the encryption
-def derive_file_key(public_key: int, salt: bytes) -> bytes:
-    key_material = public_key.to_bytes((public_key.bit_length() + 7) // 8, "big")
+def derive_file_key(private_key: int, salt: bytes) -> bytes:
+    key_material = private_key.to_bytes((private_key.bit_length() + 7) // 8, "big")
     return hashlib.scrypt(key_material, salt=salt, n=2**14, r=8, p=1, dklen=32)
 
 # encrypts the file and return tuple of (nonce, ciphertext)
